@@ -41,3 +41,21 @@ else:
 #      and data['symbol'].endswith('USDT')]
 # m.sort(key=lambda x: x['priceChangePercent'], reverse=True)
 # print(m)
+
+#
+#
+# def get_asset():
+#     data = client.get_account()
+#     myasset = [asset for asset in data['balances'] if float(asset['free']) > 0]
+#     #     a = json.dumps(data)
+#     #     x = json.loads(a, object_hook=lambda d: SimpleNamespace(**d))
+#     print(myasset)
+#
+#
+# # data = client.get_my_trades(symbol='BNBUSDT')
+# data = client.get_my_trades(symbol='WAXPUSDT')
+# print(data)
+# print(binance.helpers.convert_ts_str('1637106495964'))
+
+# get_asset()
+# print(client.get_exchange_info())
