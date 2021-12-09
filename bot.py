@@ -1,52 +1,22 @@
 import secrets
-from spot import Spot
-import time
+from market import Spot, Candle
 import asyncio
 import aiogram.utils.markdown as md
-from aiogram.types import ParseMode
+from aiogram.types import ParseMode, KeyboardButton, InputFile
 
-from datetime import datetime
-from aiogram import Bot, Dispatcher, executor, types
+from aiogram import Bot, Dispatcher, types
 import logging
 
-# async def buy(client, amount):
-#     print('*** BUY ***')
-#     result = await client.get_symbol_ticker(symbol=symblol)
-#     current_price = float(result['price'])
-#     quantity = round(amount / current_price, 5)
-#     print(f'price: {current_price} quantity: {quantity}')
-#     return quantity, current_price
-#
-#
-# async def sell(client, targetprice, quantity, stoploss):
-#     # 2 минут
-#     for i in range(120):
-#         result = await client.get_symbol_ticker(symbol=symblol)
-#         current_price = float(result['price'])
-#         print(f'current_price = {current_price}', end='\r')
-#         if current_price >= targetprice or current_price <= stoploss:
-#             print('')
-#             print('*** SELL ***')
-#             amount = current_price * quantity
-#             print(f'price: {current_price} amount: {amount}')
-#             return amount
-#         else:
-#             await asyncio.sleep(1)
-#     # если не дождались, то продаем по рынку
-#     result = await client.get_symbol_ticker(symbol=symblol)
-#     current_price = float(result['price'])
-#     print('*** SELL ***')
-#     amount = current_price * quantity
-#     print(f'price: {current_price} amount: {amount}')
-#     return amount
 
 class AssistBot:
+    my_user_id = 1095144735
 
     def __init__(self):
-        self.stop = False
+        # self.stop = False
         self.bot = Bot(token=secrets.bot_token)
         self.spot = None
         self.chat_id = None
+        self.dp = None
 
     async def start(self):
         self.spot = await Spot.create()
@@ -54,21 +24,40 @@ class AssistBot:
         print(f"Hello, I'm {me.first_name}.\nHave a nice Day!")
         await asyncio.gather(
             self.start_polling(),
-            self.spot.start_order_alarm(self.order_alarm)
+            self.spot.start_order_alarm(self.order_alarm),
+            self.deals_control()
         )
 
     async def start_polling(self):
         try:
-            disp = Dispatcher(bot=self.bot)
-            disp.register_message_handler(self.send_welcome, commands=['start', 'help'])
-            disp.register_message_handler(self.find_command, commands=['find'])
-            disp.register_message_handler(self.orders_command, commands=['orders'])
-            disp.register_message_handler(self.stop_command, commands=['stop'])
-            disp.register_message_handler(self.all_msg_handler)
-            disp.register_callback_query_handler(self.answer_callback)
-            await disp.start_polling()
+            self.dp = Dispatcher(bot=self.bot)
+            self.dp.register_message_handler(self.send_welcome, commands=['start', 'help'],
+                                             user_id=AssistBot.my_user_id)
+            self.dp.register_message_handler(self.find_command, commands=['find'], user_id=AssistBot.my_user_id)
+            self.dp.register_message_handler(self.orders_command, commands=['orders'], user_id=AssistBot.my_user_id)
+            self.dp.register_message_handler(self.stop_command, commands=['stop'], user_id=AssistBot.my_user_id)
+            self.dp.register_message_handler(self.all_msg_handler)
+            self.dp.register_callback_query_handler(self.answer_callback, user_id=AssistBot.my_user_id)
+            await self.dp.start_polling()
         finally:
             await self.bot.close()
+
+    async def deals_control(self):
+        while True:
+            if self.chat_id is None:
+                await asyncio.sleep(600)
+                continue
+
+            dealsforremove = []
+            for deal in self.spot.deals:
+                if deal.done:
+                    await self.bot.send_message(self.chat_id, str(deal))
+                    dealsforremove.append(deal)
+
+            for deal in dealsforremove:
+                self.spot.deals.remove(deal)
+
+            await asyncio.sleep(300)
 
     async def order_alarm(self, message: str):
         if self.chat_id is None:
@@ -76,16 +65,46 @@ class AssistBot:
         await self.bot.send_message(self.chat_id, message)
 
     async def find_command(self, message: types.Message):
-        self.stop = False
-        percent = 10
-        try:
-            percent = float(message.get_args())
-        except:
-            percent = 10
+        # self.stop = False
+        args = message.get_args().split(' ')
 
-        await message.answer(f'Start find for up {percent}%...')
-        async for data in self.spot.find_iter(percent):
-            await message.answer(data)
+        keyboard_markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        keyboard_markup.add(KeyboardButton('/stop'))
+
+        percent = 10
+        velocity = 1
+        try:
+            if len(args) > 0 and args[0] != '':
+                percent = float(args[0])
+            if len(args) > 1:
+                velocity = float(args[1])
+        except Exception as err:
+            percent = 10
+            velocity = 1
+            await message.answer(f'parse error. {err}')
+
+        await message.answer(f'Start find for dx> {percent}% and v> {velocity}...', reply_markup=keyboard_markup)
+
+        async for candle in self.spot.find_iter(percent, velocity):
+            if isinstance(candle, Candle):
+                text = (f'{candle.symbol}\n'
+                        f'o: {candle.open} $ c: {candle.close} $\n'
+                        f'dx,%: {candle.dx} %\n'
+                        f'velocity: {candle.v} p/min')
+
+                keyboard_buy = types.InlineKeyboardMarkup(row_width=2)
+                keyboard_buy.clean()
+                keyboard_buy.row(
+                    types.InlineKeyboardButton('buy/sell +5%', callback_data=f'bs {candle.symbol} 5'),
+                    types.InlineKeyboardButton('buy/sell +10%', callback_data=f'bs {candle.symbol} 10')
+                )
+
+                await message.answer(text, reply_markup=keyboard_buy)
+                with open('testsave.png', 'rb') as photo:
+                    await message.answer_photo(photo)
+
+            else:
+                await message.answer(candle, reply_markup=types.ReplyKeyboardRemove())
 
     async def orders_command(self, message: types.Message):
         orders = await self.spot.get_open_orders()
@@ -101,14 +120,6 @@ class AssistBot:
 
     async def send_welcome(self, message: types.Message):
         self.chat_id = message.chat.id
-        # Remove keyboard
-        keyboard_markup = types.InlineKeyboardMarkup(row_width=3)
-        text_and_data = (
-            ('Find 10%', 'find10'),
-            ('Find 20%', 'find20'),
-        )
-        row_btns = (types.InlineKeyboardButton(text, callback_data=data) for text, data in text_and_data)
-        keyboard_markup.row(*row_btns)
 
         markup = types.ReplyKeyboardRemove()
         await message.reply(
@@ -117,32 +128,27 @@ class AssistBot:
                 md.text('Уou are subscribed to change the order status'),
                 sep='\n'
             ),
-            reply_markup=keyboard_markup,
+            # reply_markup=keyboard_markup,
             parse_mode=ParseMode.MARKDOWN
         )
 
     async def answer_callback(self, query: types.CallbackQuery):
-        answer_data = query.data
+        answer_data = query.data.split(sep=' ')
         # always answer callback queries, even if you have nothing to say
         await query.answer(f'You answered with {answer_data!r}')
 
-        percent = 99
-        if answer_data == 'find10':
-            percent = 10
-        elif answer_data == 'find20':
-            percent = 20
-
-        await self.bot.send_message(query.from_user.id, f'Start find for up {percent}%...')
-        async for data in self.spot.find_iter(percent):
-            await self.bot.send_message(query.from_user.id, data)
+        if answer_data[0] == 'bs':
+            await self.bot.send_message(self.chat_id, f'start deal for {answer_data[1]} with gross {answer_data[2]}%')
+            await self.spot.startdeal(answer_data[1], float(answer_data[2]))
 
     async def all_msg_handler(self, message: types.Message):
-        await message.answer(message.text)
+        await message.answer(f'{message.from_user.id} {message.text}')
 
 
 async def main():
     bot = AssistBot()
     await bot.start()
+
 
 if __name__ == "__main__":
     # asyncio.run(main)

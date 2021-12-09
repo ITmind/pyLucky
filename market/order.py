@@ -1,6 +1,21 @@
 class Order:
-    def __init__(self, data):
-        self.update(data)
+    def __init__(self):
+        pass
+
+    @classmethod
+    def fromdata(cls, data):
+        obj = cls()
+        obj.update(data)
+        return obj
+
+    @classmethod
+    def create_virtual(cls, symbol, price, qty):
+        obj = cls()
+        obj.symbol = symbol
+        obj.price = price
+        obj.origQty = qty
+        obj.status = 'NEW'
+        return obj
 
     def update(self, data):
         self.symbol = data['symbol']
@@ -14,6 +29,5 @@ class Order:
         self.type = data["type"]
         self.side = data["side"]
         self.stopPrice = float(data["stopPrice"])
-        self.icebergQty = float(data["icebergQty"])
         self.time = data["time"]
         self.summ = self.price * self.origQty

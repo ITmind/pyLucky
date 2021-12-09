@@ -1,0 +1,10 @@
+[Unit]
+Description=pyLucky Service
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 h%/pyLucky/bot.py
+Restart=on-failure
+
+[Install]
+WantedBy=network-online.target

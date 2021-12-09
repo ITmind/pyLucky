@@ -2,13 +2,15 @@ import time
 from datetime import datetime
 from math import floor
 from binance import AsyncClient, exceptions
-from candle import Candle
 import asyncio
 import secrets
 from functools import wraps
-from order import Order
-from symbol import Symbol
-# import finplot as fplt
+from .order import Order
+from .symbol import Symbol
+from .deal import Deal
+from .candle import Candle
+import mplfinance as mpf
+import pandas as pd
 
 
 def checkweight(func):
@@ -16,6 +18,7 @@ def checkweight(func):
     def wrapper(*args):
         self = args[0]
         if self.used_weight > Spot.weight_limit:
+            print("weight is expiried")
             return None
         result = func(*args)
         self.used_weight = int(self.client.response.headers['x-mbx-used-weight-1m'])
@@ -36,7 +39,8 @@ class Spot:
         self.used_weight = 0
         self.order_update_func = None
         self.orders = []
-        self.symbols = {}
+        self.symbols: dict = {}
+        self.deals = []
 
     @classmethod
     async def create(cls):
@@ -47,87 +51,35 @@ class Spot:
         self.symbols = {s['symbol']: Symbol(s) for s in exchange_info['symbols']}
         return self
 
-    def findasset(self):
-        """ищем растущий актив"""
-        print('******FIND*******')
-
-        minutes = datetime.now().minute
-        dozens = floor(minutes / 10)
-        minutes -= dozens * 10
-
-        while 0 <= minutes < 2 or 3 < minutes < 7 or 8 < minutes <= 9:
-            time.sleep(5)
-            minutes = datetime.now().minute
-            dozens = floor(minutes / 10)
-            minutes -= dozens * 10
-
-        print(f"current minutes is {minutes}. Start get all ticker")
-        all_ticker = self.get_all_ticker()
-
-        for ticker in all_ticker:
-
-            symbol = ticker['symbol']
-            pricechangepercent = ticker['priceChangePercent']
-
-            # уже использовали
-            # if symbol in self.used_symbols:
-            #     continue
-
-            # print(f'-- check {symbol}')
-            d = self.client.get_klines(symbol=symbol, interval=self.client.KLINE_INTERVAL_5MINUTE, limit=2)
-
-            open1 = float(d[0][1])
-            close1 = float(d[0][4])
-            dx1 = round((close1 / open1 - 1) * 100, 5)
-            open_ts = int(d[0][0]) / 1000
-            close_ts = int(d[0][6]) / 1000
-            # opentime = datetime.utcfromtimestamp(open_ts).strftime('%H:%M:%S')  # %Y-%m-%d %H:%M:%S
-            # closetime = datetime.utcfromtimestamp(close_ts).strftime('%H:%M:%S')
-            # print(f'{opentime} --- {closetime}')
-
-            open2 = float(d[1][1])
-            close2 = float(d[1][4])
-            dx2 = round((close2 / open2 - 1) * 100, 5)
-            open_ts = int(d[1][0]) / 1000
-            close_ts = int(d[1][6]) / 1000
-            # opentime = datetime.utcfromtimestamp(open_ts).strftime('%H:%M:%S')  # %Y-%m-%d %H:%M:%S
-            # closetime = datetime.utcfromtimestamp(close_ts).strftime('%H:%M:%S')
-            # print(f'{opentime} --- {closetime}')
-
-            dx = (dx1 + dx2) / 2
-
-            if dx > 1.5 and dx2 > 0.7:
-                print('')
-                print(f'open = {open1} close = {close1} dx = {dx1} %')
-                print(f'open = {open2} close = {close2} dx = {dx2} %')
-                print(f"find {symbol} priceChangePercent = {pricechangepercent}")
-                # self.used_symbols.add(symbol)
-                info = self.client.get_symbol_ticker(symbol=symbol)
-
-                return {
-                    'symbol': info['symbol'],
-                    'price': float(info['price']),
-                    'dx': dx / 100
-                }
-
-            time.sleep(0.1)
-
-        # ничего не нашли
-        self.used_symbols.clear()
-        return None
-
-    def sell(self, symbol: str, quantity: float):
+    async def sell(self, symbol: str, quantity: float):
         print(f"Sell {symbol} of {quantity}")
         # order = self.client.order_market_sell(
         #     symbol=symbol,
         #     quantity=quantity)
 
-    def buy(self, symbol: str, quantity: float):
-        print(f"Buy {symbol} of {quantity}")
-        # order = self.client.order_market_buy(
-        #     symbol=symbol,
-        #     quantity=quantity)
-        pass
+    async def buy(self, symbol: str, quantity: float):
+        new_order_info = await self.client.create_test_order(symbol=symbol,
+                                                             side=AsyncClient.SIDE_BUY,
+                                                             type=AsyncClient.ORDER_TYPE_MARKET,
+                                                             quantity=quantity,
+                                                             newOrderRespType=AsyncClient.ORDER_RESP_TYPE_RESULT)
+        # print(new_order_info)
+        # new_order = Order.fromdata(new_order_info)
+
+        # return new_order
+        price = await self.get_current_price(symbol)
+        print(f"Buy {symbol} q: {quantity} p:{price}")
+        return Order.create_virtual(symbol, price, quantity)
+
+    async def startdeal(self, symbol, profit_percentage):
+        deal = Deal(self, self.symbols[symbol], 100, profit_percentage)
+        self.deals.append(deal)
+        await deal.start()
+
+    @checkweight
+    async def get_current_price(self, symbol):
+        info = await self.client.get_symbol_ticker(symbol=symbol)
+        return float(info['price'])
 
     def get_all_ticker(self):
         info = self.client.get_ticker()
@@ -140,7 +92,7 @@ class Spot:
     def stop(self):
         self.execute = False
 
-    async def find_iter(self, up_percent):
+    async def find_iter(self, up_percent, velocity=1):
         self.execute = True
         tickers = await self.client.get_all_tickers()
         tickers = [t for t in tickers if t['symbol'].endswith(Spot.quote_asset)
@@ -163,9 +115,10 @@ class Spot:
 
                 try:
                     klines = await self.client.get_klines(symbol=symbol, interval=self.client.KLINE_INTERVAL_1HOUR,
-                                                          limit=3)
+                                                          limit=24)
                 except exceptions.BinanceAPIException as err:
                     yield "ERROR: \n" + err.message
+                    continue
 
                 self.used_weight = int(self.client.response.headers['x-mbx-used-weight-1m'])
                 # print(f'used weight in min is {used_weight}')
@@ -173,8 +126,24 @@ class Spot:
                 if len(klines) == 0:
                     continue
 
-                first = Candle(klines[0])
-                last = Candle(klines[len(klines) - 1])
+                kdata = [Candle.fromdata(symbol, k) for k in klines]
+                # is_pass = False
+                # dx_acc = 0
+                #
+                # # предпоследния свеча должна быть по dx меньше чем заданное значение поиска! иначе мы купим на самом верху
+                # for i, candle in enumerate(kdata):
+                #     if dx_acc > candle.dx:
+                #         is_pass = True
+                #         break
+                #     dx_acc = candle.dx
+                #
+                # if is_pass:
+                #     continue
+
+                kslice = klines[-3:]
+                first = Candle.fromdata(symbol, kslice[0])
+                last = Candle.fromdata(symbol, kslice[len(kslice) - 1])
+
                 # последняя свеча должна расти!
                 if last.dx <= 0:
                     continue
@@ -192,28 +161,34 @@ class Spot:
                 diff_tick = (last.close - first.open) / symbol_info.tickSize
                 v = round(diff_tick / minutes_diff, 2)
 
-                if dx_percent > up_percent:
+                if dx_percent > up_percent and v > velocity:
                     self.used_symbols.add(symbol)
-                    # newlist = [Candle(k) for k in klines]
-                    # newlist = [[k.open, k.close, k.max, k.min] for k in newlist]
-                    # fplt.candlestick_ochl(newlist)
-                    # fplt.screenshot('graph.png')
-                    print(f'tick = {symbol_info.tickSize} diff_tick = {diff_tick}')
-                    yield (f'{symbol}\n'
-                           f'open: {first.open} $\n'
-                           f'close: {last.close} $\n'
-                           f'dx: {dx}\n'
-                           f'dx,%: {dx_percent} %\n'
-                           f'tickSize: {symbol_info.tickSize}\n'
-                           f'velocity: {v} p/min')
-                await asyncio.sleep(0.3)
+                    result = Candle(symbol)
+                    result.open = first.open
+                    result.close = last.close
+                    result.dx = dx_percent
+                    result.v = v
+
+                    self.plot(kdata)
+                    yield result
+                await asyncio.sleep(0.2)
 
             await asyncio.sleep(60)
-            if datetime.now().minute == 30:
+            minute_now = datetime.now().minute
+            if minute_now == 0:
                 self.used_symbols.clear()
 
         yield "Stop find"
         # await self.client.close_connection()
+
+    def plot(self, kdata: list[Candle]):
+        data = [[k.opentime, k.open, k.max, k.min, k.close] for k in kdata]
+        df = pd.DataFrame(data)
+        df.columns = ['opentime', 'Open', 'High', 'Low', 'Close']
+        # dt_index = pd.date_range("2013-02-01", periods=2, freq="D")
+        # df["dt_index"] = dt_index
+        df = df.set_index('opentime')
+        mpf.plot(df, type='candle', style='yahoo', savefig='testsave.png')
 
     async def start_order_alarm(self, callback):
         self.order_update_func = callback
@@ -221,16 +196,19 @@ class Spot:
         while self.order_update_func is not None:
             await asyncio.sleep(60)
             for order in self.orders:
-                await self.update_order_status(order)
-                if order.status != 'NEW':
+                if await self.update_order_status(order):
                     await self.order_update_func(
                         f'Order {order.symbol}:{order.orderId} P:{order.price} Q:{order.origQty} in status {order.status}')
 
     @checkweight
     async def get_open_orders(self):
-        self.orders = [Order(o) for o in await self.client.get_open_orders()]
+        self.orders = [Order.fromdata(o) for o in await self.client.get_open_orders()]
         return self.orders
 
     @checkweight
     async def update_order_status(self, order: Order):
-        order.update(await self.client.get_order(symbol=order.symbol, orderId=order.orderId))
+        data = await self.client.get_order(symbol=order.symbol, orderId=order.orderId)
+        if data['status'] != order.status:
+            order.update(data)
+            return True
+        return False
