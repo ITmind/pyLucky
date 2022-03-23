@@ -13,3 +13,6 @@ class Symbol:
                 self.stepSize = float(_filter['stepSize'])
             elif _filter['filterType'] == 'MIN_NOTIONAL':
                 self.minNotional = float(_filter['minNotional'])
+
+    def __str__(self):
+        return self.symbol

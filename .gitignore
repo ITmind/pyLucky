@@ -1,3 +1,4 @@
 .idea
 __pycache__
-secrets.py
+mysecrets.py
+/testsave.png
